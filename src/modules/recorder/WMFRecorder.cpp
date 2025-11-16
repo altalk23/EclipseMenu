@@ -140,12 +140,46 @@ namespace eclipse::recorder {
             return;
         }
 
+        wglDXOpenDeviceNV = (decltype(wglDXOpenDeviceNV))wglGetProcAddress("wglDXOpenDeviceNV");
+        if (!wglDXOpenDeviceNV) {
+            self->m_callback("Failed to get wglDXOpenDeviceNV function.");
+            return;
+        }
+        wglDXCloseDeviceNV = (decltype(wglDXCloseDeviceNV))wglGetProcAddress("wglDXCloseDeviceNV");
+        if (!wglDXCloseDeviceNV) {
+            self->m_callback("Failed to get wglDXCloseDeviceNV function.");
+            return;
+        }
+
+        wglDXRegisterObjectNV = (decltype(wglDXRegisterObjectNV))wglGetProcAddress("wglDXRegisterObjectNV");
+        if (!wglDXRegisterObjectNV) {
+            self->m_callback("Failed to get wglDXRegisterObjectNV function.");
+            return;
+        }
+        wglDXUnregisterObjectNV = (decltype(wglDXUnregisterObjectNV))wglGetProcAddress("wglDXUnregisterObjectNV");
+        if (!wglDXUnregisterObjectNV) {
+            self->m_callback("Failed to get wglDXUnregisterObjectNV function.");
+            return;
+        }
+
+        wglDXLockObjectsNV = (decltype(wglDXLockObjectsNV))wglGetProcAddress("wglDXLockObjectsNV");
+        if (!wglDXLockObjectsNV) {
+            self->m_callback("Failed to get wglDXLockObjectsNV function.");
+            return;
+        }
+        wglDXUnlockObjectsNV = (decltype(wglDXUnlockObjectsNV))wglGetProcAddress("wglDXUnlockObjectsNV");
+        if (!wglDXUnlockObjectsNV) {
+            self->m_callback("Failed to get wglDXUnlockObjectsNV function.");
+            return;
+        }
+
         initialized = true;
     }
 
 
     void WMFRecorder::Impl::start() {
-        if (initialized) {
+        if (!initialized) {
+            self->m_callback("WMFRecorder not initialized properly.");
             return;
         }
         MFStartup(MF_VERSION);
@@ -208,39 +242,6 @@ namespace eclipse::recorder {
         encoder->GetAttributes(&attrs);
         attrs->SetUnknown(MF_SA_D3D11_AWARE, dxgiManager.Get());
 
-        wglDXOpenDeviceNV = (decltype(wglDXOpenDeviceNV))wglGetProcAddress("wglDXOpenDeviceNV");
-        if (!wglDXOpenDeviceNV) {
-            self->m_callback("Failed to get wglDXOpenDeviceNV function.");
-            return;
-        }
-        wglDXCloseDeviceNV = (decltype(wglDXCloseDeviceNV))wglGetProcAddress("wglDXCloseDeviceNV");
-        if (!wglDXCloseDeviceNV) {
-            self->m_callback("Failed to get wglDXCloseDeviceNV function.");
-            return;
-        }
-
-        wglDXRegisterObjectNV = (decltype(wglDXRegisterObjectNV))wglGetProcAddress("wglDXRegisterObjectNV");
-        if (!wglDXRegisterObjectNV) {
-            self->m_callback("Failed to get wglDXRegisterObjectNV function.");
-            return;
-        }
-        wglDXUnregisterObjectNV = (decltype(wglDXUnregisterObjectNV))wglGetProcAddress("wglDXUnregisterObjectNV");
-        if (!wglDXUnregisterObjectNV) {
-            self->m_callback("Failed to get wglDXUnregisterObjectNV function.");
-            return;
-        }
-
-        wglDXLockObjectsNV = (decltype(wglDXLockObjectsNV))wglGetProcAddress("wglDXLockObjectsNV");
-        if (!wglDXLockObjectsNV) {
-            self->m_callback("Failed to get wglDXLockObjectsNV function.");
-            return;
-        }
-        wglDXUnlockObjectsNV = (decltype(wglDXUnlockObjectsNV))wglGetProcAddress("wglDXUnlockObjectsNV");
-        if (!wglDXUnlockObjectsNV) {
-            self->m_callback("Failed to get wglDXUnlockObjectsNV function.");
-            return;
-        }
-
         // input type, reading from nvdia gpu directly
         ComPtr<IMFMediaType> inType;
         MFCreateMediaType(&inType);
@@ -272,7 +273,7 @@ namespace eclipse::recorder {
         descRgba.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         descRgba.Width = self->m_renderSettings.m_width;
         descRgba.Height = self->m_renderSettings.m_height;
-        descRgba.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        descRgba.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // assumes cocos2d using rgba8, i hope it does
         descRgba.MipLevels = 1;
         descRgba.SampleDesc.Count = 1;
         descRgba.Usage = D3D11_USAGE_DEFAULT;
@@ -282,6 +283,7 @@ namespace eclipse::recorder {
             return;
         }
 
+        // bind the gl texture to d3d directly
         glDxHandle = wglDXRegisterObjectNV(
             dxDeviceHandle,
             rgbaTexture.Get(),
@@ -320,6 +322,10 @@ namespace eclipse::recorder {
         uavDescUV.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
         uavDescUV.Texture2D.MipSlice = 0;
         hr = d3dDevice->CreateUnorderedAccessView(nv12Texture.Get(), &uavDescUV, &nv12UVUAV);
+        if (FAILED(hr)) {
+            self->m_callback("Failed to create NV12 UV UAV.");
+            return;
+        }
 
         hr = d3dDevice->CreateComputeShader(csBlob->GetBufferPointer(), csBlob->GetBufferSize(), nullptr, &computeShader);
         if (FAILED(hr)) {
@@ -339,28 +345,25 @@ namespace eclipse::recorder {
 
         UINT dispatchX = (self->m_renderSettings.m_width + 15) / 16;
         UINT dispatchY = (self->m_renderSettings.m_height + 15) / 16;
-        
         ID3D11ShaderResourceView* srvs[1] = { rgbaSRV.Get() };
         ID3D11UnorderedAccessView* uavs[2] = { nv12YUAV.Get(), nv12UVUAV.Get() };
-
         d3dContext->CSSetShader(computeShader.Get(), nullptr, 0);
         d3dContext->CSSetShaderResources(0, 1, srvs);
         d3dContext->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
         d3dContext->Dispatch(dispatchX, dispatchY, 1);
 
-        // Unbind
         ID3D11UnorderedAccessView* nullUAVs[2] = { nullptr, nullptr };
-        d3dContext->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
         ID3D11ShaderResourceView* nullSRVs[1] = { nullptr };
-        d3dContext->CSSetShaderResources(0, 1, nullSRVs);
         d3dContext->CSSetShader(nullptr, nullptr, 0);
-
+        d3dContext->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+        d3dContext->CSSetShaderResources(0, 1, nullSRVs);
 
         rtStart = 0;
     }
 
     void WMFRecorder::Impl::stop() {
         if (!initialized) {
+            self->m_callback("WMFRecorder not initialized properly.");
             return;
         }
 
@@ -486,14 +489,15 @@ namespace eclipse::recorder {
     }
 
     void WMFRecorder::start() {
-        if (m_recording) return; 
+        m_impl->init();
+        if (!m_impl->initialized || m_recording) return;
 
         m_impl->start();
         Recorder::start();
     }
 
     void WMFRecorder::stop() {
-        if (!m_recording) return;
+        if (!m_impl->initialized || !m_recording) return;
 
         Recorder::stop();
         m_impl->stop();
@@ -503,7 +507,7 @@ namespace eclipse::recorder {
     }
 
     void WMFRecorder::captureFrame(float width, float height) {
-        if (!m_recording) return;
+        if (!m_impl->initialized || !m_recording) return;
 
         m_impl->captureFrame();
         m_encodedData.clear();
