@@ -66,6 +66,17 @@ namespace impl {
         writeFrame_t m_function;
     };
 
+    class GetWritePacketFunctionEvent : public geode::Event {
+    public:
+        using writePacket_t = geode::Result<>(Dummy::*)(std::span<uint8_t>, int64_t, int64_t, int64_t);
+        GetWritePacketFunctionEvent() = default;
+
+        void setFunction(writePacket_t function) {m_function = function;}
+        writePacket_t getFunction() const {return m_function;}
+    private:
+        writePacket_t m_function;
+    };
+
     class CodecRecorderEvent : public geode::Event {
     public:
         CodecRecorderEvent() = default;
@@ -184,6 +195,32 @@ public:
         }();
         if (!writeFrame) return geode::Err("Failed to call writeFrame function.");
         return std::invoke(writeFrame, m_ptr, frameData);
+    }
+
+    /**
+     * @brief Write a single packet to the output.
+     *
+     * This function takes the raw packet data as a byte vector and writes it
+     * to the output file. The packet data must match the expected format and
+     * dimensions defined during initialization.
+     *
+     * @param packetData A vector containing the raw packet data to be written.
+     * @param dts The decoding timestamp of the packet.
+     * @param pts The presentation timestamp of the packet.
+     * @param denom The timebase denominator.
+     *
+     * @return true if the packet is successfully written, false if there is an error.
+     *
+     * @warning Ensure that the packetData is valid.
+     */
+    geode::Result<> writePacket(std::span<uint8_t> packetData, int64_t dts, int64_t pts, int64_t denom) {
+        static auto writePacket = []{
+            impl::GetWritePacketFunctionEvent event;
+            event.post();
+            return event.getFunction();
+        }();
+        if (!writePacket) return geode::Err("Failed to call writePacket function.");
+        return std::invoke(writePacket, m_ptr, packetData, dts, pts, denom);
     }
 
     /**

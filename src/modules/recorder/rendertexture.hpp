@@ -2,6 +2,7 @@
 
 #include <cocos2d.h>
 #include "spinlock.hpp"
+#include <functional>
 
 namespace eclipse::recorder {
     class RenderTexture {
@@ -9,6 +10,8 @@ namespace eclipse::recorder {
         uint32_t m_width = 0, m_height = 0;
         GLint m_oldFBO = 0, m_oldRBO = 0;
         GLuint m_fbo = 0;
+
+    public:
         GLuint m_texture = 0;
 
     public:
@@ -19,6 +22,6 @@ namespace eclipse::recorder {
         void begin();
         void end() const;
 
-        void capture(cocos2d::CCNode* node, std::span<uint8_t> buffer, utils::spinlock& frameReady);
+        void capture(cocos2d::CCNode* node, utils::spinlock& frameReady, std::function<void(float, float)>&& callback);
     };
 }

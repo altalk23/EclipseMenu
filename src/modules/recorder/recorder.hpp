@@ -1,18 +1,22 @@
 #pragma once
 #include <functional.hpp>
 #include <Geode/platform/platform.hpp>
-#include "ffmpeg-api/events.hpp"
-
-#include "rendertexture.hpp"
 #include "spinlock.hpp"
+#include "ffmpeg-api/events.hpp"
+#include "rendertexture.hpp"
 
 namespace eclipse::recorder {
     class Recorder {
     public:
-        void start();
-        void stop();
+        virtual ~Recorder() = default;
 
-        void captureFrame();
+        virtual void start();
+        virtual void stop();
+
+        virtual void captureFrame(float width, float height) = 0;
+        virtual geode::Result<> handleFrame() = 0;
+
+        void visitFrame();
 
         bool isRecording() const { return m_recording; }
         std::string getRecordingDuration() const;
@@ -21,18 +25,19 @@ namespace eclipse::recorder {
 
         static std::vector<std::string> getAvailableCodecs();
 
-    public:
         ffmpeg::RenderSettings m_renderSettings{};
 
-    private:
+    protected:
+        void setupProjection();
+
         void recordThread();
 
-    private:
         volatile bool m_recording = false;
         utils::spinlock m_frameReady;
-        std::vector<uint8_t> m_currentFrame;
-        RenderTexture m_renderTexture{};
         uint64_t m_recordingDuration = 0;
+        cocos2d::CCDirectorDelegate* m_projectionDelegate = nullptr;
+        RenderTexture m_renderTexture{};
+        ffmpeg::events::Recorder m_ffmpegRecorder{};
 
         Function<void(std::string const&)> m_callback;
     };

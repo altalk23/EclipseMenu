@@ -1,18 +1,12 @@
 #include "recorder.hpp"
 
-#include <memory>
-#include <thread>
-#include <utility>
-#include <Geode/binding/FMODAudioEngine.hpp>
-#include <Geode/loader/Log.hpp>
-#include <Geode/utils/general.hpp>
-#include <modules/debug/benchmark.hpp>
-#include <modules/recorder/DSPRecorder.hpp>
-#include <modules/utils/SingletonCache.hpp>
 #include <utils.hpp>
+#include <modules/recorder/DSPRecorder.hpp>
+#include <modules/debug/benchmark.hpp>
 
 namespace eclipse::recorder {
     namespace ffmpeg = ffmpeg::events;
+
 
     class ProjectionDelegate : public cocos2d::CCDirectorDelegate {
         void updateProjection() override {
@@ -27,8 +21,14 @@ namespace eclipse::recorder {
         }
     };
 
+    void Recorder::setupProjection() {
+        if (!m_projectionDelegate) {
+            m_projectionDelegate = new ProjectionDelegate();
+        }
+        utils::get<cocos2d::CCDirector>()->setDelegate(m_projectionDelegate);
+    }
+
     void Recorder::start() {
-        m_currentFrame.resize(m_renderSettings.m_width * m_renderSettings.m_height * 4, 0);
         m_renderTexture = RenderTexture(m_renderSettings.m_width, m_renderSettings.m_height);
         m_renderTexture.begin();
 
@@ -36,7 +36,7 @@ namespace eclipse::recorder {
 
         DSPRecorder::get()->start();
 
-        utils::get<cocos2d::CCDirector>()->m_pProjectionDelegate = new ProjectionDelegate();
+        this->setupProjection();
         std::thread(&Recorder::recordThread, this).detach();
     }
 
@@ -60,39 +60,34 @@ namespace eclipse::recorder {
         director->setProjection(cocos2d::ccDirectorProjection::kCCDirectorProjection2D);
     }
 
-    void Recorder::captureFrame() {
+    void Recorder::visitFrame() {
         // wait until the previous frame is processed
         m_frameReady.wait_for(false);
 
         // don't capture if we're not recording
         if (!m_recording) return;
 
-        m_renderTexture.capture(utils::get<PlayLayer>(), m_currentFrame, m_frameReady);
-    }
-
-    std::string Recorder::getRecordingDuration() const {
-        // m_recordingDuration is in nanoseconds
-        double inSeconds = m_recordingDuration / 1'000'000'000.0;
-        return utils::formatTime(inSeconds);
+        m_renderTexture.capture(utils::get<PlayLayer>(), m_frameReady, [&](float width, float height) {
+            this->captureFrame(width, height);
+        });
     }
 
     void Recorder::recordThread() {
         geode::utils::thread::setName("Eclipse Recorder Thread");
         geode::log::debug("Recorder thread started.");
 
-        ffmpeg::Recorder ffmpegRecorder;
-        if (!ffmpegRecorder.isValid()) {
+        if (!m_ffmpegRecorder.isValid()) {
             stop();
             m_callback("Failed to initialize ffmpeg recorder.");
             geode::log::debug("Recorder thread stopped.");
             return;
         }
 
-        auto res = ffmpegRecorder.init(m_renderSettings);
+        auto res = m_ffmpegRecorder.init(m_renderSettings);
         if (res.isErr()) {
             stop();
             m_callback(res.unwrapErr());
-            ffmpegRecorder.stop();
+            m_ffmpegRecorder.stop();
             m_frameReady.set(false); // unlock the main thread if it's waiting
             geode::log::debug("Recorder thread stopped.");
             return;
@@ -107,7 +102,7 @@ namespace eclipse::recorder {
             debug::Timer timer("Recording", &m_recordingDuration);
 
             while (m_recording) {
-                res = ffmpegRecorder.writeFrame(m_currentFrame);
+                res = this->handleFrame();
                 if (res.isErr()) {
                     m_callback(res.unwrapErr());
 
@@ -126,7 +121,7 @@ namespace eclipse::recorder {
 
         geode::log::debug("Recorder thread stopped.");
 
-        ffmpegRecorder.stop();
+        m_ffmpegRecorder.stop();
 
         DSPRecorder::get()->stop();
         auto data = DSPRecorder::get()->getData();
@@ -143,6 +138,12 @@ namespace eclipse::recorder {
         ec = {};
         std::filesystem::rename(tempPath, m_renderSettings.m_outputFile, ec);
         if (ec) return m_callback("Failed to rename temporary video file.");
+    }
+
+    std::string Recorder::getRecordingDuration() const {
+        // m_recordingDuration is in nanoseconds
+        double inSeconds = m_recordingDuration / 1'000'000'000.0;
+        return utils::formatTime(inSeconds);
     }
 
     std::vector<std::string> Recorder::getAvailableCodecs() {

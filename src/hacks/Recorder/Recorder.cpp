@@ -3,7 +3,8 @@
 #include <modules/gui/components/button.hpp>
 #include <modules/gui/components/combo.hpp>
 #include <modules/hack/hack.hpp>
-#include <modules/recorder/recorder.hpp>
+#include <modules/recorder/GLRecorder.hpp>
+#include <modules/recorder/WMFRecorder.hpp>
 
 #include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -22,7 +23,7 @@
 #endif
 
 namespace eclipse::hacks::Recorder {
-    static recorder::Recorder s_recorder;
+    static recorder::WMFRecorder s_recorder;
 
     bool levelDone = false;
     bool popupShown = false;
@@ -346,7 +347,7 @@ namespace eclipse::hacks::Recorder {
                 lastFrameTime = totalTime;
 
                 capturing = true;
-                s_recorder.captureFrame();
+                s_recorder.visitFrame();
                 capturing = false;
             }
 
