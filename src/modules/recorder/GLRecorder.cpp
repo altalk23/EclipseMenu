@@ -25,7 +25,19 @@ namespace eclipse::recorder {
         glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, m_currentFrame.data());
     }
 
-    geode::Result<> GLRecorder::handleFrame() {
-        return m_ffmpegRecorder.writeFrame(m_currentFrame);
+    geode::Result<> GLRecorder::handleRecordThread(ffmpeg::Recorder& recorder) {
+        while (m_recording) {
+            geode::log::debug("Processing frame...");
+            GEODE_UNWRAP(recorder.writeFrame(m_currentFrame));
+            geode::log::debug("Frame processed.");
+            
+
+            // break if we're not recording anymore (to avoid waiting forever)
+            if (!m_recording) break;
+
+            m_frameReady.set(false);
+            m_frameReady.wait_for(true);
+        }
+        return geode::Ok();
     }
 }

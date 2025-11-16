@@ -14,9 +14,9 @@ namespace eclipse::recorder {
         virtual void stop();
 
         virtual void captureFrame(float width, float height) = 0;
-        virtual geode::Result<> handleFrame() = 0;
+        virtual geode::Result<> handleRecordThread(ffmpeg::events::Recorder& recorder) = 0;
 
-        void visitFrame();
+        virtual void visitFrame();
 
         bool isRecording() const { return m_recording; }
         std::string getRecordingDuration() const;
@@ -37,7 +37,6 @@ namespace eclipse::recorder {
         uint64_t m_recordingDuration = 0;
         cocos2d::CCDirectorDelegate* m_projectionDelegate = nullptr;
         RenderTexture m_renderTexture{};
-        ffmpeg::events::Recorder m_ffmpegRecorder{};
 
         Function<void(std::string const&)> m_callback;
     };

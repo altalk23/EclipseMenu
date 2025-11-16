@@ -41,6 +41,7 @@ namespace eclipse::hacks::Recorder {
     cocos2d::CCSize newScreenScale;
 
     void callback(std::string const& error) {
+        geode::log::error("Recorder Error: {}", error);
         geode::queueInMainThread([error] {
             Popup::create(i18n::get_("common.error"), error);
         });

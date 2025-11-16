@@ -76,18 +76,19 @@ namespace eclipse::recorder {
         geode::utils::thread::setName("Eclipse Recorder Thread");
         geode::log::debug("Recorder thread started.");
 
-        if (!m_ffmpegRecorder.isValid()) {
+        ffmpeg::Recorder ffmpegRecorder;
+        if (!ffmpegRecorder.isValid()) {
             stop();
             m_callback("Failed to initialize ffmpeg recorder.");
             geode::log::debug("Recorder thread stopped.");
             return;
         }
 
-        auto res = m_ffmpegRecorder.init(m_renderSettings);
+        auto res = ffmpegRecorder.init(m_renderSettings);
         if (res.isErr()) {
             stop();
             m_callback(res.unwrapErr());
-            m_ffmpegRecorder.stop();
+            ffmpegRecorder.stop();
             m_frameReady.set(false); // unlock the main thread if it's waiting
             geode::log::debug("Recorder thread stopped.");
             return;
@@ -100,28 +101,19 @@ namespace eclipse::recorder {
         {
             // record the time it took to record the video (to show in the end)
             debug::Timer timer("Recording", &m_recordingDuration);
+            
+            res = this->handleRecordThread(ffmpegRecorder);
+            if (res.isErr()) {
+                m_callback(res.unwrapErr());
 
-            while (m_recording) {
-                res = this->handleFrame();
-                if (res.isErr()) {
-                    m_callback(res.unwrapErr());
-
-                    // stop recording if an error occurred
-                    this->stop();
-                    break;
-                }
-
-                // break if we're not recording anymore (to avoid waiting forever)
-                if (!m_recording) break;
-
-                m_frameReady.set(false);
-                m_frameReady.wait_for(true);
+                // stop recording if an error occurred
+                this->stop();
             }
         }
 
         geode::log::debug("Recorder thread stopped.");
 
-        m_ffmpegRecorder.stop();
+        ffmpegRecorder.stop();
 
         DSPRecorder::get()->stop();
         auto data = DSPRecorder::get()->getData();

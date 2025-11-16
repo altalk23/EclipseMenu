@@ -97,5 +97,9 @@ include(${CMAKE_SOURCE_DIR}/cmake/IncludeLibs.cmake)
 include(${CMAKE_SOURCE_DIR}/cmake/Translations.cmake)
 target_link_libraries(${PROJECT_NAME} third_party)
 
+if (WIN32)
+  target_link_libraries(${PROJECT_NAME} d3d11 dxgi mfplat mf mfuuid)
+endif()
+
 # Setup Geode
 setup_geode_mod(${PROJECT_NAME} EXTERNALS eclipse.ffmpeg-api:1.2.0)
