@@ -13,10 +13,9 @@ namespace eclipse::recorder {
         virtual void start();
         virtual void stop();
 
-        virtual void captureFrame(float width, float height) = 0;
         virtual geode::Result<> handleRecordThread(ffmpeg::events::Recorder& recorder) = 0;
 
-        virtual void visitFrame();
+        virtual void visitFrame() = 0;
 
         bool isRecording() const { return m_recording; }
         std::string getRecordingDuration() const;

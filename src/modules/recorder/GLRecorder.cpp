@@ -18,11 +18,32 @@ namespace eclipse::recorder {
     void GLRecorder::start() {
         m_currentFrame.resize(m_renderSettings.m_width * m_renderSettings.m_height * 4, 0);
         Recorder::start();
+        std::thread(&GLRecorder::recordThread, this).detach();
     }
 
-    void GLRecorder::captureFrame(float width, float height) {
+    void GLRecorder::visitFrame() {
+        // wait until the previous frame is processed
+        m_frameReady.wait_for(false);
+
+        // don't capture if we're not recording
+        if (!m_recording) return;
+
+        glViewport(0, 0, m_renderTexture.m_width, m_renderTexture.m_height);
+
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &m_renderTexture.m_oldFBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_renderTexture.m_fbo);
+
+        auto director = utils::get<cocos2d::CCDirector>();
+        director->setProjection(cocos2d::kCCDirectorProjectionCustom);
+        utils::get<PlayLayer>()->visit();
+        director->setProjection(cocos2d::kCCDirectorProjection2D);
+
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, m_currentFrame.data());
+        glReadPixels(0, 0, m_renderTexture.m_width, m_renderTexture.m_height, GL_RGBA, GL_UNSIGNED_BYTE, m_currentFrame.data());
+        m_frameReady.set(true);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, m_renderTexture.m_oldFBO);
+        director->setViewport();
     }
 
     geode::Result<> GLRecorder::handleRecordThread(ffmpeg::Recorder& recorder) {

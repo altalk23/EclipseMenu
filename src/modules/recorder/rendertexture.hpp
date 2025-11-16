@@ -6,7 +6,7 @@
 
 namespace eclipse::recorder {
     class RenderTexture {
-    protected:
+    public:
         uint32_t m_width = 0, m_height = 0;
         GLint m_oldFBO = 0, m_oldRBO = 0;
         GLuint m_fbo = 0;

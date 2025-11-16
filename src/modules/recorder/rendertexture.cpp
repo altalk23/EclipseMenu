@@ -57,21 +57,6 @@ namespace eclipse::recorder {
     }
 
     void RenderTexture::capture(cocos2d::CCNode* node, utils::spinlock& frameReady, std::function<void(float, float)>&& callback) {
-        glViewport(0, 0, m_width, m_height);
-
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &m_oldFBO);
-        glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
-
-        auto director = utils::get<cocos2d::CCDirector>();
-        director->setProjection(cocos2d::kCCDirectorProjectionCustom);
-        node->visit();
-        director->setProjection(cocos2d::kCCDirectorProjection2D);
-
-        callback(m_width, m_height);
-
-        frameReady.set(true);
-
-        glBindFramebuffer(GL_FRAMEBUFFER, m_oldFBO);
-        director->setViewport();
+        
     }
 }

@@ -8,9 +8,8 @@ namespace eclipse::recorder {
     public:
         void start() override;
 
-        void captureFrame(float width, float height) override;
+        void visitFrame() override;
         geode::Result<> handleRecordThread(ffmpeg::events::Recorder& recorder) override;
-
 
         void setCallback(Function<void(std::string const&)>&& callback) { m_callback = std::move(callback); }
 

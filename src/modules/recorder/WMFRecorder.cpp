@@ -8,7 +8,7 @@
 #include <mfidl.h>
 #include <mftransform.h>
 #include <mferror.h>
-#include <d3d11.h>
+#include <d3d12.h>
 #include <dxgi.h>
 #include <wrl.h>
 #include <Geode/cocos/platform/third_party/win32/OGLES/GL/wglew.h>
@@ -25,46 +25,32 @@
 #include <modules/utils/SingletonCache.hpp>
 #include <utils.hpp>
 
-// #define WGL_ACCESS_READ_ONLY_NV           0x00000000
-// #define WGL_ACCESS_READ_WRITE_NV          0x00000001
-// #define WGL_ACCESS_WRITE_DISCARD_NV       0x00000002
-
-// typedef HANDLE (WINAPI * PFNWGLDXOPENDEVICENVPROC) (void *dxDevice);
-// typedef BOOL (WINAPI * PFNWGLDXCLOSEDEVICENVPROC) (HANDLE hDevice);
-// typedef HANDLE (WINAPI * PFNWGLDXREGISTEROBJECTNVPROC) (HANDLE hDevice, void *dxObject, GLuint name, GLenum type, GLenum access);
-// typedef BOOL (WINAPI * PFNWGLDXUNREGISTEROBJECTNVPROC) (HANDLE hDevice, HANDLE hObject);
-// typedef BOOL (WINAPI * PFNWGLDXLOCKOBJECTSNVPROC) (HANDLE hDevice, GLint count, HANDLE *hObjects);
-// typedef BOOL (WINAPI * PFNWGLDXUNLOCKOBJECTSNVPROC) (HANDLE hDevice, GLint count, HANDLE *hObjects);
-
-// static PFNWGLDXOPENDEVICENVPROC wglDXOpenDeviceNV;
-// static PFNWGLDXCLOSEDEVICENVPROC wglDXCloseDeviceNV;
-// static PFNWGLDXREGISTEROBJECTNVPROC wglDXRegisterObjectNV;
-// static PFNWGLDXUNREGISTEROBJECTNVPROC wglDXUnregisterObjectNV;
-// static PFNWGLDXLOCKOBJECTSNVPROC wglDXLockObjectsNV;
-// static PFNWGLDXUNLOCKOBJECTSNVPROC wglDXUnlockObjectsNV;
-
 auto RGBA2NV12 = R"HLSL(
 Texture2D<float4> src : register(t0);
-RWTexture2D<uint1> dstY : register(u0);
-RWTexture2D<uint2> dstUV : register(u1);
+RWTexture2D<float> dstY : register(u0);
+RWTexture2D<float2> dstUV : register(u1);
 cbuffer FrameSize : register(b0)
 {
-    uint4 width;
-    uint4 height;
-    uint4 padding[2];
+    uint width;
+    uint height;
+    uint padding[2];
 };
 
 [numthreads(16,16,1)]
-void main(uint3 DTid : SV_DispatchThreadID) {
-    uint x = DTid.x;
-    uint y = DTid.y;
+void main(uint3 id : SV_DispatchThreadID) {
+    uint x = id.x;
+    uint y = id.y;
+
+    if (x >= width || y >= height) {
+        return;
+    }
 
     float4 rgba = src.Load(int3(x, y, 0));
     float r = rgba.r * 255;
     float g = rgba.g * 255;
     float b = rgba.b * 255;
 
-    uint Y = uint(clamp(0.257*r + 0.504*g + 0.098*b + 16, 0, 255));
+    float Y = clamp(0.257*r + 0.504*g + 0.098*b + 16, 0, 255) / 255.0;
     dstY[int2(x, y)] = Y;
 
     if ((x % 2 == 0) && (y % 2 == 0)) {
@@ -80,10 +66,10 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         float gAvg = 0.25*(c0.g + c1.g + c2.g + c3.g)*255.0;
         float bAvg = 0.25*(c0.b + c1.b + c2.b + c3.b)*255.0;
 
-        uint U = uint(clamp(-0.147*rAvg - 0.289*gAvg + 0.436*bAvg + 128.0, 0.0, 255.0));
-        uint V = uint(clamp(0.615*rAvg - 0.515*gAvg - 0.100*bAvg + 128.0, 0.0, 255.0));
+        float U = clamp(-0.147*rAvg - 0.289*gAvg + 0.436*bAvg + 128.0, 0.0, 255.0) / 255.0;
+        float V = clamp(0.615*rAvg - 0.515*gAvg - 0.100*bAvg + 128.0, 0.0, 255.0) / 255.0;
 
-        dstUV[int2(x/2, y/2)] = uint2(U, V);
+        dstUV[int2(x/2, y/2)] = float2(U, V);
     }
 }
 )HLSL";
@@ -100,8 +86,9 @@ namespace eclipse::recorder {
 
         LONGLONG rtStart = 0;
         ComPtr<IMFTransform> encoder;
-        ComPtr<ID3D11Device> d3dDevice;
-        ComPtr<ID3D11DeviceContext> d3dContext;
+        ComPtr<ID3D12Device> d3dDevice;
+        ComPtr<ID3D12CommandQueue> d3dCommandQueue;
+        ComPtr<ID3D12GraphicsCommandList> d3dCommandList;
         ComPtr<IMFDXGIDeviceManager> dxgiManager;
         UINT resetToken = 0;
 
@@ -111,12 +98,20 @@ namespace eclipse::recorder {
         HANDLE dxDeviceHandle;
         HANDLE glDxHandle;
         GLuint glTexture;
-        ComPtr<ID3D11Texture2D> rgbaTexture;
-        ComPtr<ID3D11Texture2D> nv12Texture;
-        ComPtr<ID3D11UnorderedAccessView> nv12YUAV;
-        ComPtr<ID3D11UnorderedAccessView> nv12UVUAV;
-        ComPtr<ID3D11ComputeShader> computeShader;
-        ComPtr<ID3D11ShaderResourceView> rgbaSRV;
+
+        ComPtr<ID3D12DescriptorHeap> descriptorHeap;
+
+        ComPtr<ID3D12Resource> rgbaTexture;
+        ComPtr<ID3D12Resource> nv12Texture;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE nv12YUAV;
+        D3D12_CPU_DESCRIPTOR_HANDLE nv12UVUAV;
+        D3D12_CPU_DESCRIPTOR_HANDLE rgbaSRV;
+
+        ComPtr<ID3D12RootSignature> rootSignature;
+        ComPtr<ID3D12PipelineState> computePipeline;
+        
+        ComPtr<ID3D12Resource> frameSizeBuffer;
         ComPtr<ID3DBlob> csBlob;
         ComPtr<ID3DBlob> errorBlob;
 
@@ -129,11 +124,13 @@ namespace eclipse::recorder {
 
         ComPtr<IMFMediaEventGenerator> m_eventGenerator;
 
+        bool startPipeline();
+
         void init();
         void start();
         void stop();
 
-        void captureFrame();
+        void visitFrame();
         bool drain();
 
         void returnErr(HRESULT hr, std::string const& msg) {
@@ -189,41 +186,89 @@ namespace eclipse::recorder {
             }
             return;
         }
-
-        // wglDXOpenDeviceNV = (decltype(wglDXOpenDeviceNV))wglGetProcAddress("wglDXOpenDeviceNV");
-        // if (!wglDXOpenDeviceNV) {
-        //     self->m_callback("Failed to get wglDXOpenDeviceNV function.");
-        //     return;
-        // }
-        // wglDXCloseDeviceNV = (decltype(wglDXCloseDeviceNV))wglGetProcAddress("wglDXCloseDeviceNV");
-        // if (!wglDXCloseDeviceNV) {
-        //     self->m_callback("Failed to get wglDXCloseDeviceNV function.");
-        //     return;
-        // }
-
-        // wglDXRegisterObjectNV = (decltype(wglDXRegisterObjectNV))wglGetProcAddress("wglDXRegisterObjectNV");
-        // if (!wglDXRegisterObjectNV) {
-        //     self->m_callback("Failed to get wglDXRegisterObjectNV function.");
-        //     return;
-        // }
-        // wglDXUnregisterObjectNV = (decltype(wglDXUnregisterObjectNV))wglGetProcAddress("wglDXUnregisterObjectNV");
-        // if (!wglDXUnregisterObjectNV) {
-        //     self->m_callback("Failed to get wglDXUnregisterObjectNV function.");
-        //     return;
-        // }
-
-        // wglDXLockObjectsNV = (decltype(wglDXLockObjectsNV))wglGetProcAddress("wglDXLockObjectsNV");
-        // if (!wglDXLockObjectsNV) {
-        //     self->m_callback("Failed to get wglDXLockObjectsNV function.");
-        //     return;
-        // }
-        // wglDXUnlockObjectsNV = (decltype(wglDXUnlockObjectsNV))wglGetProcAddress("wglDXUnlockObjectsNV");
-        // if (!wglDXUnlockObjectsNV) {
-        //     self->m_callback("Failed to get wglDXUnlockObjectsNV function.");
-        //     return;
-        // }
-
         initialized = true;
+    }
+
+    bool WMFRecorder::Impl::startPipeline() {
+        D3D12_DESCRIPTOR_RANGE1 uavRanges[2];
+        uavRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        uavRanges[0].NumDescriptors = 1;
+        uavRanges[0].BaseShaderRegister = 0;
+        uavRanges[0].RegisterSpace = 0;
+        uavRanges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+        uavRanges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        uavRanges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        uavRanges[1].NumDescriptors = 1;
+        uavRanges[1].BaseShaderRegister = 1;
+        uavRanges[1].RegisterSpace = 0;
+        uavRanges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+        uavRanges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        D3D12_DESCRIPTOR_RANGE1 srvRanges[1];
+        srvRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[0].NumDescriptors = 1;
+        srvRanges[0].BaseShaderRegister = 0;
+        srvRanges[0].RegisterSpace = 0;
+        srvRanges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+        srvRanges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        D3D12_ROOT_PARAMETER1 rootParams[3];
+        rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[0].DescriptorTable.NumDescriptorRanges = 2;
+        rootParams[0].DescriptorTable.pDescriptorRanges = uavRanges;
+        rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[1].DescriptorTable.pDescriptorRanges = srvRanges;
+        rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rootParams[2].Constants.Num32BitValues = 4;
+        rootParams[2].Constants.ShaderRegister = 0;
+        rootParams[2].Constants.RegisterSpace = 0;
+        rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+        D3D12_VERSIONED_ROOT_SIGNATURE_DESC rootSigDesc = {};
+        rootSigDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        rootSigDesc.Desc_1_1.NumParameters = _countof(rootParams);
+        rootSigDesc.Desc_1_1.pParameters = rootParams;
+        rootSigDesc.Desc_1_1.NumStaticSamplers = 0;
+        rootSigDesc.Desc_1_1.pStaticSamplers = nullptr;
+        rootSigDesc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+        // Serialize & create root signature
+        ComPtr<ID3DBlob> serializedRootSig;
+        ComPtr<ID3DBlob> errorBlob;
+        HRESULT hr = D3D12SerializeVersionedRootSignature(
+            &rootSigDesc,
+            &serializedRootSig,
+            &errorBlob
+        );
+        if (FAILED(hr)) {
+            if (errorBlob) {
+                std::string errorMsg((char*)errorBlob->GetBufferPointer(), errorBlob->GetBufferSize());
+                this->returnErr(hr, fmt::format("Failed to serialize root signature: {}", errorMsg));
+            } else {
+                this->returnErr(hr, "Failed to serialize root signature: Unknown error.");
+            }
+            return false;
+        }
+
+        hr = d3dDevice->CreateRootSignature(
+            0,
+            serializedRootSig->GetBufferPointer(),
+            serializedRootSig->GetBufferSize(),
+            IID_PPV_ARGS(&rootSignature)
+        );
+        if (FAILED(hr)) return this->returnErrFalse(hr, "Failed to create root signature");
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = rootSignature.Get();
+        psoDesc.CS.pShaderBytecode = csBlob->GetBufferPointer();
+        psoDesc.CS.BytecodeLength = csBlob->GetBufferSize();
+        hr = d3dDevice->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&computePipeline));
+        if (FAILED(hr)) return this->returnErrFalse(hr, "Failed to create compute PSO");
+
+        return true;
     }
 
     void WMFRecorder::Impl::start() {
@@ -237,19 +282,12 @@ namespace eclipse::recorder {
         MFStartup(MF_VERSION);
 
         D3D_FEATURE_LEVEL featureLevel;
-        HRESULT hr = D3D11CreateDevice(
+        HRESULT hr = D3D12CreateDevice(
             nullptr,
-            D3D_DRIVER_TYPE_HARDWARE,
-            nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            nullptr,
-            0,
-            D3D11_SDK_VERSION,
-            &d3dDevice,
-            &featureLevel,
-            &d3dContext
+            D3D_FEATURE_LEVEL_11_0,
+            IID_PPV_ARGS(&d3dDevice)
         );
-        if (FAILED(hr)) return this->returnErr(hr, "Failed to create D3D11 device.");
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to create D3D12 device.");
 
         hr = MFCreateDXGIDeviceManager(&resetToken, &dxgiManager);
         if (FAILED(hr)) return this->returnErr(hr, "Failed to create DXGI Device Manager.");
@@ -312,6 +350,33 @@ namespace eclipse::recorder {
         hr = encoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)dxgiManager.Get());
         if (FAILED(hr)) return this->returnErr(hr, "Failed to set D3D manager.");
 
+        if (!this->startPipeline()) return;
+
+        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+        queueDesc.NodeMask = 0;
+
+        hr = d3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&d3dCommandQueue));
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to create D3D12 command queue.");
+
+        ComPtr<ID3D12CommandAllocator> commandAllocator;
+        hr = d3dDevice->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(&commandAllocator)
+        );
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to create D3D12 command allocator.");
+        
+        hr = d3dDevice->CreateCommandList(
+            0,
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            commandAllocator.Get(),
+            computePipeline.Get(),
+            IID_PPV_ARGS(&d3dCommandList)
+        );
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to create D3D12 command list.");
+
 
         // output type, h264 till i figure out how to change
         ComPtr<IMFMediaType> outType;
@@ -341,16 +406,28 @@ namespace eclipse::recorder {
         dxDeviceHandle = wglDXOpenDeviceNV(d3dDevice.Get());
         glTexture = self->m_renderTexture.m_texture;
 
-        D3D11_TEXTURE2D_DESC descRgba = {};
-        descRgba.ArraySize = 1;
-        descRgba.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+        D3D12_RESOURCE_DESC descRgba = {};
+        descRgba.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         descRgba.Width = self->m_renderSettings.m_width;
         descRgba.Height = self->m_renderSettings.m_height;
-        descRgba.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // assumes cocos2d using rgba8, i hope it does
+        descRgba.DepthOrArraySize = 1;
         descRgba.MipLevels = 1;
+        descRgba.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         descRgba.SampleDesc.Count = 1;
-        descRgba.Usage = D3D11_USAGE_DEFAULT;
-        hr = d3dDevice->CreateTexture2D(&descRgba, nullptr, &rgbaTexture);
+        descRgba.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        descRgba.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+        D3D12_HEAP_PROPERTIES heapProps = {};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        hr = d3dDevice->CreateCommittedResource(
+            &heapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &descRgba,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr,
+            IID_PPV_ARGS(&rgbaTexture)
+        );
         if (FAILED(hr)) return this->returnErr(hr, "Failed to create RGBA texture.");
 
         // bind the gl texture to d3d directly
@@ -366,41 +443,103 @@ namespace eclipse::recorder {
             return;
         }
 
-        D3D11_TEXTURE2D_DESC descNV12 = {};
-        descNV12.ArraySize = 1;
-        descNV12.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+        D3D12_RESOURCE_DESC descNV12 = {};
+        descNV12.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         descNV12.Width = self->m_renderSettings.m_width;
         descNV12.Height = self->m_renderSettings.m_height;
-        descNV12.Format = DXGI_FORMAT_NV12;
+        descNV12.DepthOrArraySize = 1;
         descNV12.MipLevels = 1;
+        descNV12.Format = DXGI_FORMAT_NV12;
         descNV12.SampleDesc.Count = 1;
-        descNV12.Usage = D3D11_USAGE_DEFAULT;
-        hr = d3dDevice->CreateTexture2D(&descNV12, nullptr, &nv12Texture);
-        if (FAILED(hr)) return this->returnErr(hr, "Failed to create NV12 texture.");
+        descNV12.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        descNV12.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        heapProps = {};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDescY = {};
+        hr = d3dDevice->CreateCommittedResource(
+            &heapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &descNV12,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            nullptr,
+            IID_PPV_ARGS(&nv12Texture)
+        );
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to create RGBA texture.");
+
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+        heapDesc.NumDescriptors = 3;
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        heapDesc.NodeMask = 0;
+        hr = d3dDevice->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&descriptorHeap));
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to create descriptor heap.");
+
+        UINT descriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = descriptorHeap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle = descriptorHeap->GetGPUDescriptorHandleForHeapStart();
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDescY = {};
         uavDescY.Format = DXGI_FORMAT_R8_UNORM;
-        uavDescY.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        uavDescY.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         uavDescY.Texture2D.MipSlice = 0;
-        hr = d3dDevice->CreateUnorderedAccessView(nv12Texture.Get(), &uavDescY, &nv12YUAV);
-        if (FAILED(hr)) return this->returnErr(hr, "Failed to create NV12 Y UAV.");
+        uavDescY.Texture2D.PlaneSlice = 0;
+        d3dDevice->CreateUnorderedAccessView(
+            nv12Texture.Get(),
+            nullptr,
+            &uavDescY,
+            cpuHandle
+        );
+        D3D12_GPU_DESCRIPTOR_HANDLE uavGPUHandle = gpuHandle;
+        nv12YUAV = cpuHandle;
 
-        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDescUV = {};
+        cpuHandle.ptr += descriptorSize;
+        gpuHandle.ptr += descriptorSize;
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDescUV = {};
         uavDescUV.Format = DXGI_FORMAT_R8G8_UNORM;
-        uavDescUV.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+        uavDescUV.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         uavDescUV.Texture2D.MipSlice = 0;
-        hr = d3dDevice->CreateUnorderedAccessView(nv12Texture.Get(), &uavDescUV, &nv12UVUAV);
-        if (FAILED(hr)) return this->returnErr(hr, "Failed to create NV12 UV UAV.");
+        uavDescUV.Texture2D.PlaneSlice = 1;
+        d3dDevice->CreateUnorderedAccessView(
+            nv12Texture.Get(),
+            nullptr,
+            &uavDescUV,
+            cpuHandle
+        );
+        nv12UVUAV = cpuHandle;
 
-        hr = d3dDevice->CreateComputeShader(csBlob->GetBufferPointer(), csBlob->GetBufferSize(), nullptr, &computeShader);
-        if (FAILED(hr)) return this->returnErr(hr, "Failed to create compute shader.");
+        cpuHandle.ptr += descriptorSize;
+        gpuHandle.ptr += descriptorSize;
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels = 1;
-        hr = d3dDevice->CreateShaderResourceView(rgbaTexture.Get(), &srvDesc, &rgbaSRV);
-        if (FAILED(hr)) return this->returnErr(hr, "Failed to create RGBA SRV.");
+        d3dDevice->CreateShaderResourceView(
+            rgbaTexture.Get(),
+            &srvDesc,
+            cpuHandle
+        );
+        rgbaSRV = cpuHandle;
+        D3D12_GPU_DESCRIPTOR_HANDLE srvGPUHandle = gpuHandle;
+
+        cpuHandle.ptr += descriptorSize;
+
+        commandAllocator->Reset();
+        d3dCommandList->Reset(commandAllocator.Get(), computePipeline.Get());
+        
+        ID3D12DescriptorHeap* heaps[] = { descriptorHeap.Get() };
+        d3dCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+        d3dCommandList->SetComputeRootSignature(rootSignature.Get());
+        d3dCommandList->SetComputeRootDescriptorTable(0, uavGPUHandle);
+        d3dCommandList->SetComputeRootDescriptorTable(1, srvGPUHandle);
+        d3dCommandList->SetComputeRootConstantBufferView(2, frameSizeBuffer->GetGPUVirtualAddress());
+
+        
+        d3dCommandList->Close();
+        ID3D12CommandList* lists[] = { d3dCommandList.Get() };
+        d3dCommandQueue->ExecuteCommandLists(_countof(lists), lists);
 
         struct FrameSizeCB {
             UINT width;
@@ -408,48 +547,55 @@ namespace eclipse::recorder {
             UINT padding[2];
         };
 
-        D3D11_BUFFER_DESC cbd = {};
-        cbd.Usage = D3D11_USAGE_DEFAULT;
-        cbd.ByteWidth = sizeof(FrameSizeCB);
-        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        cbd.CPUAccessFlags = 0;
+        FrameSizeCB cbData = { self->m_renderSettings.m_width, self->m_renderSettings.m_height, 0, 0 };
 
-        FrameSizeCB cb = { self->m_renderSettings.m_width, self->m_renderSettings.m_height };
-        D3D11_SUBRESOURCE_DATA initData = {};
-        initData.pSysMem = &cb;
+        heapProps = {};
+        heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+        heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 
-        ComPtr<ID3D11Buffer> frameSizeBuffer;
-        hr = d3dDevice->CreateBuffer(&cbd, &initData, &frameSizeBuffer);
-        if (FAILED(hr)) return this->returnErr(hr, "Failed to create frame size constant buffer.");
+        D3D12_RESOURCE_DESC cbDesc = {};
+        cbDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        cbDesc.Alignment = 0;
+        cbDesc.Width = sizeof(FrameSizeCB);
+        cbDesc.Height = 1;
+        cbDesc.DepthOrArraySize = 1;
+        cbDesc.MipLevels = 1;
+        cbDesc.Format = DXGI_FORMAT_UNKNOWN;
+        cbDesc.SampleDesc.Count = 1;
+        cbDesc.SampleDesc.Quality = 0;
+        cbDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        cbDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-        UINT dispatchX = (self->m_renderSettings.m_width + 15) / 16;
-        UINT dispatchY = (self->m_renderSettings.m_height + 15) / 16;
-        ID3D11ShaderResourceView* srvs[1] = { rgbaSRV.Get() };
-        ID3D11UnorderedAccessView* uavs[2] = { nv12YUAV.Get(), nv12UVUAV.Get() };
-        ID3D11Buffer* cbuffers[1] = { frameSizeBuffer.Get() };
-        d3dContext->CSSetShader(computeShader.Get(), nullptr, 0);
-        d3dContext->CSSetShaderResources(0, 1, srvs);
-        d3dContext->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
-        d3dContext->CSSetConstantBuffers(0, 1, cbuffers);
-        d3dContext->Dispatch(dispatchX, dispatchY, 1);
+        hr = d3dDevice->CreateCommittedResource(
+            &heapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &cbDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&frameSizeBuffer)
+        );
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to create frame size buffer");
 
-        ID3D11UnorderedAccessView* nullUAVs[2] = { nullptr, nullptr };
-        ID3D11ShaderResourceView* nullSRVs[1] = { nullptr };
-        ID3D11Buffer* nullCBuffers[1] = { nullptr };
-        d3dContext->CSSetShader(nullptr, nullptr, 0);
-        d3dContext->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
-        d3dContext->CSSetShaderResources(0, 1, nullSRVs);
-        d3dContext->CSSetConstantBuffers(0, 1, nullCBuffers);
+        // Map and copy data
+        UINT8* pData;
+        D3D12_RANGE range = {0, 0}; // We do not intend to read from it on CPU
+        hr = frameSizeBuffer->Map(0, &range, reinterpret_cast<void**>(&pData));
+        if (FAILED(hr)) return this->returnErr(hr, "Failed to map frame size buffer");
+
+        memcpy(pData, &cbData, sizeof(FrameSizeCB));
+        frameSizeBuffer->Unmap(0, nullptr);
+
         rtStart = 0;
-
-        encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-        encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
         encoder.As(&m_eventGenerator);
         if (!m_eventGenerator) {
             self->m_callback("Encoder does not support media event generator interface.");
             return;
         }
+
+        encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
         started = true;
     }
@@ -487,20 +633,17 @@ namespace eclipse::recorder {
 
         rgbaTexture.Reset();
         nv12Texture.Reset();
-        nv12YUAV.Reset();
-        nv12UVUAV.Reset();
-        computeShader.Reset();
-        rgbaSRV.Reset();
+        computePipeline.Reset();
+        frameSizeBuffer.Reset();
         glTexture = 0;
         encoder.Reset();
         dxgiManager.Reset();
-        d3dContext.Reset();
         d3dDevice.Reset();
 
         MFShutdown();
     }
 
-    void WMFRecorder::Impl::captureFrame() {
+    void WMFRecorder::Impl::visitFrame() {
         if (!initialized) {
             self->m_callback("WMFRecorder not initialized properly.");
             return;
@@ -509,11 +652,45 @@ namespace eclipse::recorder {
             return;
         }
 
-        wglDXLockObjectsNV(dxDeviceHandle, 1, &glDxHandle);
+        auto ret = wglDXLockObjectsNV(dxDeviceHandle, 1, &glDxHandle);
+        if (!ret) {
+            self->m_callback("Failed to lock GL object for DX access.");
+            return;
+        }
+
+        glViewport(0, 0, self->m_renderTexture.m_width, self->m_renderTexture.m_height);
+
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &self->m_renderTexture.m_oldFBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, self->m_renderTexture.m_fbo);
+
+        auto director = utils::get<cocos2d::CCDirector>();
+        director->setProjection(cocos2d::kCCDirectorProjectionCustom);
+        utils::get<PlayLayer>()->visit();
+
+        director->setProjection(cocos2d::kCCDirectorProjection2D);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, self->m_renderTexture.m_oldFBO);
+        director->setViewport();
+
+        UINT dispatchX = (self->m_renderSettings.m_width + 15) / 16;
+        UINT dispatchY = (self->m_renderSettings.m_height + 15) / 16;
+        d3dCommandList->Dispatch(dispatchX, dispatchY, 1);
+
+        d3dCommandList->Close();
+        ID3D12CommandList* lists[] = { d3dCommandList.Get() };
+        d3dCommandQueue->ExecuteCommandLists(_countof(lists), lists);
+
+        wglDXUnlockObjectsNV(dxDeviceHandle, 1, &glDxHandle);
 
         ComPtr<IMFMediaBuffer> buffer;
-        HRESULT hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12Texture.Get(), 0, FALSE, &buffer);
-        if (FAILED(hr)) return this->returnErrUnlock(hr, "Failed to create DXGI surface buffer.");
+        HRESULT hr = MFCreateDXGISurfaceBuffer(
+            __uuidof(ID3D12Resource),
+            nv12Texture.Get(),
+            0,
+            FALSE,
+            &buffer
+        );
+        if (FAILED(hr)) return this->returnErrUnlock(hr, "Failed to create DXGI surface y buffer.");
 
         ComPtr<IMFSample> sample;
         hr = MFCreateSample(&sample);
@@ -528,49 +705,150 @@ namespace eclipse::recorder {
         hr = sample->SetSampleDuration(10 * 1000 * 1000 / self->m_renderSettings.m_fps);
         if (FAILED(hr)) return this->returnErrUnlock(hr, "Failed to set sample duration.");
 
-        if (rtStart == 0) {
-            ComPtr<ID3D11Texture2D> staging;
-            D3D11_TEXTURE2D_DESC desc;
-            rgbaTexture->GetDesc(&desc);
-            desc.Usage = D3D11_USAGE_STAGING;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            desc.BindFlags = 0;
-            desc.MiscFlags = 0; 
-            d3dDevice->CreateTexture2D(&desc, nullptr, &staging);
-            d3dContext->CopyResource(staging.Get(), rgbaTexture.Get());
-            D3D11_MAPPED_SUBRESOURCE mapped;
-            d3dContext->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-            auto ptr = mapped.pData;
+        rtStart += 10 * 1000 * 1000 / self->m_renderSettings.m_fps;
 
-            std::ofstream file(geode::dirs::getGeodeDir() / "frame.rgba", std::ios::binary);
-            std::vector<uint8_t> data(self->m_renderSettings.m_width * self->m_renderSettings.m_height * 4);
+        // Access RGBA texture
+        {
+            // Assume rgbaTexture is your GPU resource (ID3D12Resource)
+            D3D12_RESOURCE_DESC desc = rgbaTexture->GetDesc();
 
-            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            // Create a readback buffer
+            D3D12_RESOURCE_DESC readbackDesc = {};
+            readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            readbackDesc.Alignment = 0;
+            readbackDesc.Width = desc.Width * desc.Height * 4; // RGBA8
+            readbackDesc.Height = 1;
+            readbackDesc.DepthOrArraySize = 1;
+            readbackDesc.MipLevels = 1;
+            readbackDesc.Format = DXGI_FORMAT_UNKNOWN;
+            readbackDesc.SampleDesc.Count = 1;
+            readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            readbackDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-            // Read pixels from the current framebuffer
-            glReadPixels(0, 0, self->m_renderSettings.m_width, self->m_renderSettings.m_height, GL_RGBA, GL_UNSIGNED_BYTE, data.data());
-            file.write(reinterpret_cast<char*>(ptr), self->m_renderSettings.m_width * self->m_renderSettings.m_height * 4);
+            D3D12_HEAP_PROPERTIES heapProps = {};
+            heapProps.Type = D3D12_HEAP_TYPE_READBACK;
 
-            // for (UINT row = 0; row < desc.Height; ++row) {
-            //     // Each row: mapped.RowPitch bytes, but only Width*4 are actual pixel data
-            //     file.write(reinterpret_cast<char*>(mapped.pData) + row * mapped.RowPitch, desc.Width * 4);
-            // }
-            // // write Y plane
-            // for (UINT row = 0; row < desc.Height; ++row) {
-            //     file.write(reinterpret_cast<char*>(static_cast<BYTE*>(mapped.pData) + row * mapped.RowPitch), desc.Width);
-            // }
+            ComPtr<ID3D12Resource> readbackBuffer;
+            HRESULT hr = d3dDevice->CreateCommittedResource(
+                &heapProps,
+                D3D12_HEAP_FLAG_NONE,
+                &readbackDesc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(&readbackBuffer)
+            );
+            if (FAILED(hr)) { /* handle error */ }
 
-            // // write UV plane (half height)
-            // BYTE* uvBase = static_cast<BYTE*>(mapped.pData) + mapped.RowPitch * desc.Height;
-            // for (UINT row = 0; row < desc.Height / 2; ++row) {
-            //     file.write(reinterpret_cast<char*>(uvBase + row * mapped.RowPitch), desc.Width);
-            // }
-            file.close();
+            // Copy texture to buffer
+            D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
+            srcLocation.pResource = rgbaTexture.Get();
+            srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            srcLocation.SubresourceIndex = 0;
 
-            d3dContext->Unmap(staging.Get(), 0);
+            D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
+            dstLocation.pResource = readbackBuffer.Get();
+            dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            d3dDevice->GetCopyableFootprints(&desc, 0, 1, 0, &dstLocation.PlacedFootprint, nullptr, nullptr, nullptr);
+
+            d3dCommandList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+            d3dCommandList->Close();
+            ID3D12CommandList* lists[] = { d3dCommandList.Get() };
+            d3dCommandQueue->ExecuteCommandLists(_countof(lists), lists);
+            // Wait for GPU to finish copy before mapping
+
+            // Map the buffer
+            void* mappedData = nullptr;
+            readbackBuffer->Map(0, nullptr, &mappedData);
+
+            UINT x = 10;
+            UINT y = 20;
+            BYTE* row = reinterpret_cast<BYTE*>(mappedData) + y * dstLocation.PlacedFootprint.Footprint.RowPitch;
+            BYTE* pixel = row + x * 4; // RGBA8
+            BYTE r = pixel[0];
+            BYTE g = pixel[1];
+            BYTE b = pixel[2];
+            BYTE a = pixel[3];
+
+            geode::log::debug("Pixel at ({}, {}): R={} G={} B={} A={}", x, y, r, g, b, a);
+
+            readbackBuffer->Unmap(0, nullptr);
         }
 
-        rtStart += 10 * 1000 * 1000 / self->m_renderSettings.m_fps;
+        // Access NV12 texture
+        {
+            D3D12_RESOURCE_DESC desc = nv12Texture->GetDesc();
+
+            // Readback buffer
+            UINT yPlaneSize = desc.Width * desc.Height;
+            UINT uvPlaneSize = (desc.Width * desc.Height) / 2;
+            UINT totalSize = yPlaneSize + uvPlaneSize;
+
+            D3D12_RESOURCE_DESC readbackDesc = {};
+            readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            readbackDesc.Alignment = 0;
+            readbackDesc.Width = totalSize;
+            readbackDesc.Height = 1;
+            readbackDesc.DepthOrArraySize = 1;
+            readbackDesc.MipLevels = 1;
+            readbackDesc.Format = DXGI_FORMAT_UNKNOWN;
+            readbackDesc.SampleDesc.Count = 1;
+            readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            readbackDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+            D3D12_HEAP_PROPERTIES heapProps = {};
+            heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+
+            ComPtr<ID3D12Resource> readbackBuffer;
+            HRESULT hr = d3dDevice->CreateCommittedResource(
+                &heapProps,
+                D3D12_HEAP_FLAG_NONE,
+                &readbackDesc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(&readbackBuffer)
+            );
+            if (FAILED(hr)) { /* handle error */ }
+
+            // Copy NV12 texture to readback buffer
+            D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
+            srcLocation.pResource = nv12Texture.Get();
+            srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            srcLocation.SubresourceIndex = 0;
+
+            D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
+            dstLocation.pResource = readbackBuffer.Get();
+            dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+            footprint.Footprint.Width = desc.Width;
+            footprint.Footprint.Height = desc.Height;
+            footprint.Footprint.Depth = 1;
+            footprint.Footprint.RowPitch = desc.Width; // Y plane
+            footprint.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+            dstLocation.PlacedFootprint = footprint;
+
+            d3dCommandList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+            d3dCommandList->Close();
+            ID3D12CommandList* lists[] = { d3dCommandList.Get() };
+            d3dCommandQueue->ExecuteCommandLists(_countof(lists), lists);
+            // Wait for GPU to finish copy before mapping
+
+            void* mappedData = nullptr;
+            readbackBuffer->Map(0, nullptr, &mappedData);
+
+            UINT x = 10;
+            UINT y = 20;
+            BYTE* row = reinterpret_cast<BYTE*>(mappedData) + y * desc.Width;
+            BYTE yValue = row[x];
+
+            // UV plane
+            BYTE* uvPlane = reinterpret_cast<BYTE*>(mappedData) + yPlaneSize;
+            BYTE uValue = uvPlane[(y / 2) * (desc.Width) + (x & ~1)];       // U at even index
+            BYTE vValue = uvPlane[(y / 2) * (desc.Width) + (x & ~1) + 1];   // V at odd index
+
+            geode::log::debug("NV12 Pixel at ({}, {}): Y={} U={} V={}", x, y, yValue, uValue, vValue);
+
+            readbackBuffer->Unmap(0, nullptr);
+        }
 
         {
             std::lock_guard lock(m_sampleQueueMutex);
@@ -578,7 +856,7 @@ namespace eclipse::recorder {
         }
         m_sampleQueueCv.notify_one();
 
-        wglDXUnlockObjectsNV(dxDeviceHandle, 1, &glDxHandle);
+        self->m_frameReady.set(true);
     }
 
     bool WMFRecorder::Impl::drain() {
@@ -647,6 +925,7 @@ namespace eclipse::recorder {
 
         Recorder::start();
         m_impl->start();
+        std::thread(&WMFRecorder::recordThread, this).detach();
     }
 
     void WMFRecorder::stop() {
@@ -659,20 +938,11 @@ namespace eclipse::recorder {
         m_currentFrame = std::span<uint8_t>();
     }
 
-    void WMFRecorder::captureFrame(float width, float height) {
-        if (!m_impl->initialized || !m_recording) return;
-
-        m_impl->captureFrame();
-        m_encodedData.clear();
-    }
-
     void WMFRecorder::visitFrame() {
         // don't capture if we're not recording
         if (!m_recording) return;
 
-        m_renderTexture.capture(utils::get<PlayLayer>(), m_frameReady, [&](float width, float height) {
-            this->captureFrame(width, height);
-        });
+        m_impl->visitFrame();
     }
 
     geode::Result<> WMFRecorder::handleRecordThread(ffmpeg::Recorder& recorder) {

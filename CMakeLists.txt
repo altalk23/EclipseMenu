@@ -98,7 +98,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/Translations.cmake)
 target_link_libraries(${PROJECT_NAME} third_party)
 
 if (WIN32)
-  target_link_libraries(${PROJECT_NAME} d3d11 dxgi mfplat mf mfuuid)
+  target_link_libraries(${PROJECT_NAME} d3d12 dxgi mfplat mf mfuuid)
 endif()
 
 # Setup Geode

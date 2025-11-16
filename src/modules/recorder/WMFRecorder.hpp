@@ -11,7 +11,6 @@ namespace eclipse::recorder {
         void start() override;
         void stop() override;
 
-        void captureFrame(float width, float height) override;
         geode::Result<> handleRecordThread(ffmpeg::events::Recorder& recorder) override;
         void visitFrame() override;
 

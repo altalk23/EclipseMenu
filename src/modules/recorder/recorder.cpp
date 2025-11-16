@@ -37,7 +37,6 @@ namespace eclipse::recorder {
         DSPRecorder::get()->start();
 
         this->setupProjection();
-        std::thread(&Recorder::recordThread, this).detach();
     }
 
     void Recorder::stop() {
@@ -58,18 +57,6 @@ namespace eclipse::recorder {
         }
 
         director->setProjection(cocos2d::ccDirectorProjection::kCCDirectorProjection2D);
-    }
-
-    void Recorder::visitFrame() {
-        // wait until the previous frame is processed
-        m_frameReady.wait_for(false);
-
-        // don't capture if we're not recording
-        if (!m_recording) return;
-
-        m_renderTexture.capture(utils::get<PlayLayer>(), m_frameReady, [&](float width, float height) {
-            this->captureFrame(width, height);
-        });
     }
 
     void Recorder::recordThread() {
